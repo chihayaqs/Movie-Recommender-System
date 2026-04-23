@@ -52,6 +52,8 @@ Movie-Recommender-System/
 |   ├── evaluation.py        # 模型评估：评估指标计算
 │   └── utils.py             # 功能函数
 |
+├── logs/                    #日志文件
+|
 ├── notebooks/              
 |   ├── analysis.ipynb       # 数据可视化
 |   └── model_test.ipynb     # 原型验证、对比实验
