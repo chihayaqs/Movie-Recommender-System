@@ -1,0 +1,15 @@
+# 核心数据分析与可视化
+numpy
+pandas
+matplotlib
+seaborn
+
+# 建模与实验
+scikit-learn
+scikit-surprise
+
+# Notebook运行环境
+ipykernel
+nbformat
+nbclient
+jupyter
