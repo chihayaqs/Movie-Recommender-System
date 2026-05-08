@@ -1,3 +1,11 @@
+"""
+本文件为数据预处理代码
+主要流程：
+1. 从清洗后的ratings数据中构建用户评分矩阵
+2. 计算矩阵的稀疏度
+3. 将矩阵保存到cleaned_data目录,供后续使用
+"""
+
 from pathlib import Path
 import pandas as pd
 
