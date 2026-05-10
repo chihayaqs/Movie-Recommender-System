@@ -7,9 +7,9 @@ import pandas as pd
 
 def load_user_item_matrix(project_root: Path) -> pd.DataFrame:
 	"""读取已经处理好的用户-电影评分矩阵。"""
-	path = project_root / "data" / "cleaned_data" / "user_item_matrix.csv"
+	path = project_root / "data" / "cleaned_data" / "user_item_matrix_sparse_filtered.csv"
 	if not path.exists():
-		raise FileNotFoundError(f"user_item_matrix.csv not found: {path}")
+		raise FileNotFoundError(f"user_item_matrix_sparse_filtered.csv not found: {path}")
 	matrix = pd.read_csv(path, index_col=0)
 	matrix.index = matrix.index.astype(int)
 	matrix.columns = matrix.columns.astype(int)
