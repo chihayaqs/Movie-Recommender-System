@@ -197,7 +197,8 @@ def predict_ratings_item_based(
 			preds[item_id] = float(item_means_values[pos])
 			continue
 
-		numer = np.dot(selected_sims, user_values[selected_positions])
+		rating_deviations = user_values[selected_positions] - user_mean
+		numer = np.dot(selected_sims, rating_deviations)
 		score = user_mean + float(numer / denom)
 		preds[item_id] = _clip_prediction(score, matrix)
 
