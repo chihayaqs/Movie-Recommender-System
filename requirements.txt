@@ -8,6 +8,8 @@ seaborn
 scikit-learn
 scikit-surprise
 
+streamlit
+
 # Notebook运行环境
 ipykernel
 nbformat
