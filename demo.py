@@ -12,11 +12,16 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from cf_recommender import compute_item_similarity, load_user_item_matrix, predict_ratings_item_based
+from cf_recommender import (
+    compute_item_similarity,
+    load_user_item_matrix,
+    predict_ratings_item_based,
+    rerank_predictions_item_based,
+)
 
 
 st.set_page_config(
-    page_title="电影推荐 Demo",
+    page_title="电影推荐系统",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -236,8 +241,9 @@ def recommend_for_user(
     n: int,
 ) -> pd.DataFrame:
     preds = predict_ratings_item_based(matrix, sim_matrix, user_id, top_k=top_k)
+    ranked = rerank_predictions_item_based(matrix, sim_matrix, user_id, preds, top_k=top_k)
     recs = (
-        preds.dropna()
+        ranked.dropna()
         .head(n)
         .rename("pred_rating")
         .reset_index()
@@ -254,7 +260,7 @@ matrix, sim_matrix = load_recommender(str(PROJECT_ROOT))
 st.markdown(
     """
     <div class="hero">
-        <h1>电影推荐 Demo</h1>
+        <h1>电影推荐系统</h1>
         <p>一个简化版电影网站原型：浏览热门与高分电影，搜索片名，按类型探索，并获得个性化推荐。</p>
     </div>
     """,

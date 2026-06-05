@@ -24,6 +24,38 @@ LEGACY_ALGORITHM_ALIASES = {
 	"baseline": BASELINE_ALGORITHM,
 }
 DEFAULT_ALGORITHMS = (BASELINE_ALGORITHM, SKLEARN_ALGORITHM)
+SUMMARY_COLUMNS = [
+	"algorithm",
+	"top_k_neighbors",
+	"top_n",
+	"n_users",
+	"n_test_ratings",
+	"n_users_with_relevant_items",
+	"RMSE",
+	"MAE",
+	"Weighted_RMSE",
+	"Weighted_MAE",
+	"Precision@K",
+	"Recall@K",
+	"HitRate@K",
+	"Precision@K_relevant_users",
+	"Recall@K_relevant_users",
+	"HitRate@K_relevant_users",
+]
+PER_USER_COLUMNS = [
+	"userId",
+	"n_test_ratings",
+	"n_predicted_test_ratings",
+	"n_relevant_items",
+	"n_hits",
+	"RMSE",
+	"MAE",
+	"SSE",
+	"SAE",
+	"Precision@K",
+	"Recall@K",
+	"HitRate@K",
+]
 
 
 @dataclass(frozen=True)
@@ -31,6 +63,7 @@ class AlgorithmSpec:
 	name: str
 	compute_similarity: Callable[[pd.DataFrame], Any]
 	predict_ratings: Callable[[pd.DataFrame, Any, object, int], pd.Series]
+	rank_ratings: Optional[Callable[[pd.DataFrame, Any, object, int], pd.Series]] = None
 
 
 def _normalize_algorithm_name(algorithm: str) -> str:
@@ -73,21 +106,28 @@ def _sklearn_predict_ratings(
 	user_id: object,
 	top_k: int,
 ) -> pd.Series:
-	if user_id not in matrix.index:
-		return _fallback_item_ranking(matrix)
-	item_ids = list(similarity_bundle.columns)
-	user_ratings = matrix.loc[user_id].reindex(item_ids)
-	values = matrix.to_numpy(dtype=float)
-	observed = values[~np.isnan(values)]
-	clip_bounds = None if observed.size == 0 else (float(np.nanmin(observed)), float(np.nanmax(observed)))
-	return _predict_from_similarity(
-		user_ratings=user_ratings,
-		sim_values=similarity_bundle.to_numpy(dtype=float),
-		item_ids=item_ids,
+	return sklearn_cf.predict_ratings_item_based(
+		matrix=matrix,
+		sim_matrix=similarity_bundle,
+		user_id=user_id,
 		top_k=top_k,
-		center_by_user=True,
-		clip_bounds=clip_bounds,
-		fallback_scores=_fallback_item_ranking(matrix).reindex(item_ids),
+	)
+
+
+def _sklearn_rank_ratings(
+	matrix: pd.DataFrame,
+	similarity_bundle: pd.DataFrame,
+	user_id: object,
+	top_k: int,
+) -> pd.Series:
+	"""Return model ranking scores used only for Top-N evaluation."""
+	predicted_ratings = _sklearn_predict_ratings(matrix, similarity_bundle, user_id, top_k)
+	return sklearn_cf.rerank_predictions_item_based(
+		matrix=matrix,
+		sim_matrix=similarity_bundle,
+		user_id=user_id,
+		predictions=predicted_ratings,
+		top_k=top_k,
 	)
 
 
@@ -101,6 +141,7 @@ ALGORITHM_SPECS = {
 		name=SKLEARN_ALGORITHM,
 		compute_similarity=_sklearn_compute_similarity,
 		predict_ratings=_sklearn_predict_ratings,
+		rank_ratings=_sklearn_rank_ratings,
 	),
 }
 
@@ -246,54 +287,108 @@ def _evaluate_one_user(
 		return {}
 
 	preds = spec.predict_ratings(train_matrix, similarity_bundle, user_id, top_k_neighbors)
-	ranked_recommendations = _top_n_from_predictions(preds, top_n)
+	# 评分预测和推荐排序可以分离：增强模型的重排序只服务 Top-N 指标，
+	# RMSE/MAE 仍使用原始评分预测，避免把排序加成误当成评分。
+	ranking_scores = (
+		spec.rank_ratings(train_matrix, similarity_bundle, user_id, top_k_neighbors)
+		if spec.rank_ratings is not None
+		else preds
+	)
+	ranked_recommendations = _top_n_from_predictions(ranking_scores, top_n)
 
 	test_preds = preds.reindex(true_ratings.index)
 	common = test_preds.dropna().index.intersection(true_ratings.index)
 	if len(common) > 0:
 		diff = test_preds.loc[common].astype(float) - true_ratings.loc[common].astype(float)
-		rmse = float(np.sqrt(np.mean(np.square(diff.to_numpy()))))
-		mae = float(np.mean(np.abs(diff.to_numpy())))
+		diff_values = diff.to_numpy()
+		squared_errors = np.square(diff_values)
+		absolute_errors = np.abs(diff_values)
+		rmse = float(np.sqrt(np.mean(squared_errors)))
+		mae = float(np.mean(absolute_errors))
+		sse = float(np.sum(squared_errors))
+		sae = float(np.sum(absolute_errors))
 	else:
 		rmse = np.nan
 		mae = np.nan
+		sse = np.nan
+		sae = np.nan
 
 	relevant_items = true_ratings[true_ratings >= relevance_threshold].index
+	hits = 0
 	if len(relevant_items) == 0:
 		precision_at_k = 0.0
 		recall_at_k = 0.0
+		hit_rate_at_k = 0.0
 	else:
 		hits = len(set(ranked_recommendations) & set(relevant_items))
 		precision_at_k = hits / max(1, min(top_n, len(ranked_recommendations)))
 		recall_at_k = hits / len(relevant_items)
+		hit_rate_at_k = 1.0 if hits > 0 else 0.0
 
 	return {
 		"userId": user_id,
+		"n_test_ratings": int(len(true_ratings)),
+		"n_predicted_test_ratings": int(len(common)),
+		"n_relevant_items": int(len(relevant_items)),
+		"n_hits": int(hits),
 		"RMSE": rmse,
 		"MAE": mae,
+		"SSE": sse,
+		"SAE": sae,
 		"Precision@K": precision_at_k,
 		"Recall@K": recall_at_k,
+		"HitRate@K": hit_rate_at_k,
 	}
 
 
 def _empty_summary(algorithm: str, top_k_neighbors: int, top_n: int) -> pd.DataFrame:
-	result = pd.DataFrame(
-		[
-			{
-				"algorithm": algorithm,
-				"top_k_neighbors": top_k_neighbors,
-				"top_n": top_n,
-				"n_users": 0,
-				"n_test_ratings": 0,
-				"RMSE": np.nan,
-				"MAE": np.nan,
-				"Precision@K": np.nan,
-				"Recall@K": np.nan,
-			}
-		]
+	row = {column: np.nan for column in SUMMARY_COLUMNS}
+	row.update(
+		{
+			"algorithm": algorithm,
+			"top_k_neighbors": top_k_neighbors,
+			"top_n": top_n,
+			"n_users": 0,
+			"n_test_ratings": 0,
+			"n_users_with_relevant_items": 0,
+		}
 	)
-	result.attrs["per_user_results"] = pd.DataFrame(columns=["userId", "RMSE", "MAE", "Precision@K", "Recall@K"])
+	result = pd.DataFrame([row]).reindex(columns=SUMMARY_COLUMNS)
+	result.attrs["per_user_results"] = pd.DataFrame(columns=PER_USER_COLUMNS)
 	return result
+
+
+def _summarize_detail_results(
+	detail_df: pd.DataFrame,
+	algorithm: str,
+	top_k_neighbors: int,
+	top_n: int,
+) -> Dict[str, float]:
+	"""Aggregate per-user metrics into one report row."""
+	relevant_detail = detail_df[detail_df["n_relevant_items"] > 0]
+	n_predicted = int(detail_df["n_predicted_test_ratings"].sum())
+	total_sse = float(detail_df["SSE"].sum(skipna=True))
+	total_sae = float(detail_df["SAE"].sum(skipna=True))
+
+	summary = {
+		"algorithm": algorithm,
+		"top_k_neighbors": top_k_neighbors,
+		"top_n": top_n,
+		"n_users": int(len(detail_df)),
+		"n_test_ratings": int(detail_df["n_test_ratings"].sum()),
+		"n_users_with_relevant_items": int(len(relevant_detail)),
+		"RMSE": float(detail_df["RMSE"].mean(skipna=True)),
+		"MAE": float(detail_df["MAE"].mean(skipna=True)),
+		"Weighted_RMSE": float(np.sqrt(total_sse / n_predicted)) if n_predicted > 0 else np.nan,
+		"Weighted_MAE": float(total_sae / n_predicted) if n_predicted > 0 else np.nan,
+		"Precision@K": float(detail_df["Precision@K"].mean(skipna=True)),
+		"Recall@K": float(detail_df["Recall@K"].mean(skipna=True)),
+		"HitRate@K": float(detail_df["HitRate@K"].mean(skipna=True)),
+		"Precision@K_relevant_users": float(relevant_detail["Precision@K"].mean(skipna=True)) if not relevant_detail.empty else np.nan,
+		"Recall@K_relevant_users": float(relevant_detail["Recall@K"].mean(skipna=True)) if not relevant_detail.empty else np.nan,
+		"HitRate@K_relevant_users": float(relevant_detail["HitRate@K"].mean(skipna=True)) if not relevant_detail.empty else np.nan,
+	}
+	return summary
 
 
 def evaluate_algorithm(
@@ -340,13 +435,7 @@ def evaluate_algorithm(
 		return _empty_summary(algorithm, top_k_neighbors, top_n)
 
 	detail_df = pd.DataFrame(detail_rows)
-	summary = detail_df[["RMSE", "MAE", "Precision@K", "Recall@K"]].mean(numeric_only=True).to_frame().T
-	summary.insert(0, "algorithm", algorithm)
-	summary.insert(1, "top_k_neighbors", top_k_neighbors)
-	summary.insert(2, "top_n", top_n)
-	summary.insert(3, "n_users", len(detail_df))
-	n_test_ratings = int(sum(test_matrix.loc[user_id].notna().sum() for user_id in detail_df["userId"] if user_id in test_matrix.index))
-	summary.insert(4, "n_test_ratings", n_test_ratings)
+	summary = pd.DataFrame([_summarize_detail_results(detail_df, algorithm, top_k_neighbors, top_n)]).reindex(columns=SUMMARY_COLUMNS)
 	summary.attrs["per_user_results"] = detail_df
 	return summary
 
@@ -411,7 +500,12 @@ def recommend_for_user(
 	train_matrix = train_matrix.apply(pd.to_numeric, errors="coerce")
 	spec = ALGORITHM_SPECS[algorithm]
 	similarity_bundle = spec.compute_similarity(train_matrix)
-	preds = spec.predict_ratings(train_matrix, similarity_bundle, user_id, top_k_neighbors)
+	# 推荐展示使用排序分数；普通模型排序分数等同预测评分，增强模型会叠加重排序特征。
+	preds = (
+		spec.rank_ratings(train_matrix, similarity_bundle, user_id, top_k_neighbors)
+		if spec.rank_ratings is not None
+		else spec.predict_ratings(train_matrix, similarity_bundle, user_id, top_k_neighbors)
+	)
 	top = preds.dropna().sort_values(ascending=False).head(top_n)
 	return list(top.items())
 
@@ -512,22 +606,72 @@ def sensitivity_analysis(
 				continue
 
 			detail_df = pd.DataFrame(detail_rows)
-			summary = detail_df[["RMSE", "MAE", "Precision@K", "Recall@K"]].mean(numeric_only=True).to_dict()
-			summary.update(
-				{
-					"algorithm": algorithm,
-					"top_k_neighbors": top_k_neighbors,
-					"top_n": top_n,
-					"n_users": len(detail_df),
-					"n_test_ratings": int(
-						sum(test_matrix.loc[user_id].notna().sum() for user_id in detail_df["userId"] if user_id in test_matrix.index)
-					),
-				}
-			)
+			summary = _summarize_detail_results(detail_df, algorithm, top_k_neighbors, top_n)
 			rows.append(summary)
 
-	columns = ["algorithm", "top_k_neighbors", "top_n", "n_users", "n_test_ratings", "RMSE", "MAE", "Precision@K", "Recall@K"]
+	return pd.DataFrame(rows).reindex(columns=SUMMARY_COLUMNS)
+
+
+def repeated_compare_models(
+	matrix: pd.DataFrame,
+	algorithms: Sequence[str] = DEFAULT_ALGORITHMS,
+	random_states: Sequence[int] = (0, 1, 2, 3, 4),
+	test_size: float = 0.2,
+	top_k_neighbors: int = 20,
+	top_n: int = 10,
+	relevance_threshold: float = DEFAULT_RELEVANCE_THRESHOLD,
+) -> pd.DataFrame:
+	"""Run model comparison across multiple random splits."""
+	rows = []
+	for random_state in random_states:
+		result = compare_models(
+			matrix=matrix,
+			algorithms=algorithms,
+			test_size=test_size,
+			top_k_neighbors=top_k_neighbors,
+			top_n=top_n,
+			random_state=random_state,
+			relevance_threshold=relevance_threshold,
+			user_ids=None,
+		)
+		if result.empty:
+			continue
+		result = result.copy()
+		result.insert(0, "random_state", random_state)
+		rows.extend(result.to_dict("records"))
+	columns = ["random_state"] + SUMMARY_COLUMNS
 	return pd.DataFrame(rows).reindex(columns=columns)
+
+
+def summarize_repeated_results(
+	repeated_results: pd.DataFrame,
+	metric_columns: Sequence[str] = (
+		"RMSE",
+		"MAE",
+		"Weighted_RMSE",
+		"Weighted_MAE",
+		"Precision@K",
+		"Recall@K",
+		"HitRate@K",
+		"Precision@K_relevant_users",
+		"Recall@K_relevant_users",
+		"HitRate@K_relevant_users",
+	),
+) -> pd.DataFrame:
+	"""Summarize repeated evaluation as mean/std columns by model setting."""
+	if repeated_results.empty:
+		return pd.DataFrame()
+	group_cols = ["algorithm", "top_k_neighbors", "top_n"]
+	available_metrics = [column for column in metric_columns if column in repeated_results.columns]
+	aggregated = repeated_results.groupby(group_cols, dropna=False)[available_metrics].agg(["mean", "std"])
+	aggregated.columns = [f"{metric}_{stat}" for metric, stat in aggregated.columns]
+	aggregated = aggregated.reset_index()
+
+	count_cols = ["n_users", "n_test_ratings", "n_users_with_relevant_items"]
+	count_summary = repeated_results.groupby(group_cols, dropna=False)[count_cols].mean().reset_index()
+	for column in count_cols:
+		count_summary[column] = count_summary[column].round().astype(int)
+	return count_summary.merge(aggregated, on=group_cols, how="left")
 
 
 def load_default_matrix(project_root: Optional[Path] = None) -> pd.DataFrame:
