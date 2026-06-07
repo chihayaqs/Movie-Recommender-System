@@ -1,15 +1,19 @@
-# 核心数据分析与可视化
+# 核心数据处理与数值计算
 numpy
 pandas
+
+# 可视化与 Notebook 展示
 matplotlib
 seaborn
 
-# 建模与实验
+# 协同过滤建模
 scikit-learn
-scikit-surprise
 
-# Notebook运行环境
+# 交互式推荐系统页面
+streamlit
+
+# Notebook 运行环境
 ipykernel
+jupyter
 nbformat
 nbclient
-jupyter

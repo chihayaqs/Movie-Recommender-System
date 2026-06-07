@@ -119,4 +119,3 @@ def main_demo(project_root: Path = Path(__file__).resolve().parent.parent):
 
 if __name__ == "__main__":
 	main_demo()
-
